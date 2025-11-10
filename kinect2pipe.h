@@ -126,12 +126,12 @@ private:
      */
     bool openV4L2LoopbackDevice(const char* loopbackDev, int width, int height);
     /**
-     * openWatchV4L2LoopbackDevice creates a thread that calls watchV4L2LoopbackDevice that will watch the v4l2loopback
-     * device for processes opening and closing the device.
-     * @param lookbackDev The loopback device to watch.
+     * openProcMonitorV4L2LoopbackDevice creates a thread that calls procMonitorV4L2LoopbackDevice that will check running processes
+	 * for any process which is using the v4l2loopback device.
+     * @param lookbackDev The loopback device to look out for.
      * @return True if everything goes well, false otherwise.
      */
-    bool openWatchV4L2LoopbackDevice(const char* lookbackDev);
+    bool openProcMonitorV4L2LoopbackDevice(const char* loopbackDev);
     /**
      * openKinect2Device will open and read from a Kinect 2 device. This method will block and read from the device
      * until shut down or an error occurs.
@@ -145,10 +145,10 @@ private:
      */
     bool handleFrame(Frame* frame);
     /**
-     * watchV4L2LoopbackDevice method will attach an inotify listener to the requested v4l2loopback device and will
-     * start up the Kinect frame listener when the video device gets opened.
+     * procMonitorV4L2LoopbackDevice method cycle through all currently running processes to determine if there are any symlinks to the v4l2loopback device
+	 * and will start up the Kinect frame listener when the video device gets opened.
      */
-    void watchV4L2LoopbackDevice();
+    void procMonitorV4L2LoopbackDevice(const char* loopbackDev);
     /**
      * drainInotifyEvents will read from the inotify handle started in watchV4L2LoopbackDevice until there have been no
      * events for two seconds. We do this because upon opening the inotify handle we can get old buffered events.
