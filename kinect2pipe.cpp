@@ -7,10 +7,11 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <thread>
+#include <dirent.h>
+#include <algorithm>
 #include "kinect2pipe.h"
 extern "C" {
     #include <libswscale/swscale.h>
-    #include <sys/inotify.h>
 }
 using namespace std;
 using namespace libfreenect2;
@@ -34,8 +35,6 @@ Kinect2Pipe::Kinect2Pipe () {
     this->dstStride[3] = 0;
 
     this->v4l2Device = 0;
-    this->inotifyFd = 0;
-    this->watcherFd = 0;
     this->openCount = 0;
     this->started = false;
 
@@ -47,7 +46,7 @@ void Kinect2Pipe::openLoopback(const char *loopbackDev) {
         exit(1);
     }
     this->writeBlankFrame();
-    if (!this->openWatchV4L2LoopbackDevice(loopbackDev)) {
+    if (!this->openProcMonitorV4L2LoopbackDevice(loopbackDev)) {
         exit(1);
     }
 }
@@ -111,88 +110,75 @@ bool Kinect2Pipe::handleFrame(Frame* frame) {
     return write(this->v4l2Device, this->imageBuffer, YUV_BUFFER_LEN) > 0;
 }
 
-bool Kinect2Pipe::openWatchV4L2LoopbackDevice(const char* loopbackDev) {
-    this->inotifyFd = inotify_init();
-    if (this->inotifyFd < 0) {
-        cerr << "failed to initialize inotify watcher: " << errno << endl;
-        return false;
-    }
-    this->watcherFd = inotify_add_watch(this->inotifyFd, loopbackDev, IN_OPEN|IN_CLOSE);
-    if (this->watcherFd < 0) {
-        cerr << "failed to initialize add inotify watcher on " << loopbackDev << ": " << errno << endl;
-        return false;
-    }
-    this->watcherThread = thread (&Kinect2Pipe::watchV4L2LoopbackDevice, this);
+bool Kinect2Pipe::openProcMonitorV4L2LoopbackDevice(const char* loopbackDev) {
+    this->watcherThread = thread (&Kinect2Pipe::procMonitorV4L2LoopbackDevice, this, loopbackDev);
     this->watcherThread.detach();
     return true;
 }
-
-void Kinect2Pipe::watchV4L2LoopbackDevice() {
+void Kinect2Pipe::procMonitorV4L2LoopbackDevice(const char* loopbackDev) {
     // We'll own the lock on this until we're ready to rumble.
     unique_lock<mutex> lk(this->startMutex);
     this->startCondition.wait(lk, [this]{ return !this->started; });
-    this->drainInotifyEvents();
-    inotify_event events[20];
 
-    fd_set set;
-    struct timeval timeout{10, 0};
+    const string current_pid = to_string(getpid());
+    const string target = loopbackDev;
+
     while (true) {
-        FD_ZERO(&set);
-        FD_SET(this->inotifyFd, &set);
-        timeout.tv_sec = 10;
-        int retr = select(this->inotifyFd + 1, &set, nullptr, nullptr, &timeout);
-        if (retr < 0) {
-            // error
-            cout << "watcher select encountered an problem and quit" << endl;
-            return;
-        } else if (retr == 0) {
-            if (this->openCount == 0 && this->started) {
-                cout << "closing device since no one is watching" << endl;
-                this->started = false;
-                lk.lock();
-            }
-        } else {
-            int len = read(this->inotifyFd, &events, sizeof(events));
-            if (len <= 0) {
-                cout << "watcher encountered an problem and quit" << endl;
-                return;
-            }
-            for (int i = 0; i < (len / sizeof(inotify_event)); i++) {
-                inotify_event *evt = &events[i];
-                if (evt->mask & IN_OPEN) {
-                    this->openCount++;
-                    if (!this->started) {
-                        this->started = true;
-                        lk.unlock();
-                        this->startCondition.notify_one();
-                    }
+		// Open /proc directory
+		DIR *proc_dir = opendir("/proc");
+		if (!proc_dir) {
+			perror("opendir /proc");
+			exit(-1);
+		}
 
-                } else if (evt->mask & IN_CLOSE) {
-                    this->openCount--;
-                    if (this->openCount <= 0) {
-                        this->openCount = 0;
-                    }
-                }
-            }
-        }
-    }
-}
+		// Iterate over entries in /proc
+		struct dirent *entry;
+		while ((entry = readdir(proc_dir)) != nullptr) {
+			string pid_str(entry->d_name);
+			if (!all_of(pid_str.begin(), pid_str.end(), ::isdigit)) continue; // skip non-numeric names
+			if (pid_str == current_pid) continue; // skip current process
 
-void Kinect2Pipe::drainInotifyEvents() {
-    fd_set set;
-    struct timeval timeout{2, 0};
-    inotify_event events[20];
-    FD_ZERO(&set);
-    FD_SET(this->inotifyFd, &set);
-    while(true) {
-        int retr = select(this->inotifyFd + 1, &set, nullptr, nullptr, &timeout);
-        if (retr == -1) {
-            return;
-        } else if (retr == 0) {
-            return;
-        } else {
-            read(this->inotifyFd, &events, sizeof(events));
-        }
+			// Build path to fd directory
+			string fd_dir_path = "/proc/" + pid_str + "/fd";
+			DIR *fd_dir = opendir(fd_dir_path.c_str());
+			if (!fd_dir) continue; // can't open fd dir; maybe insufficient permission
+
+			struct dirent *fd_entry;
+			while ((fd_entry = readdir(fd_dir)) != nullptr) {
+				// skip . and ..
+				if (strcmp(fd_entry->d_name, ".") == 0 || strcmp(fd_entry->d_name, "..") == 0)
+					continue;
+
+				// path to fd symlink
+				string fd_path = fd_dir_path + "/" + fd_entry->d_name;
+
+				// readlink to get target
+				char link_target[PATH_MAX];
+				ssize_t len = readlink(fd_path.c_str(), link_target, sizeof(link_target)-1);
+				if (len == -1) continue; // not a symlink or error
+				link_target[len] = '\0';
+
+				if (target == link_target) {
+					this->openCount++;
+					if (!this->started) {
+						this->started = true;
+						lk.unlock();
+						this->startCondition.notify_one();
+					}
+				}
+			}
+			closedir(fd_dir);
+		}
+		closedir(proc_dir);
+
+		if(this->openCount == 0 && this->started) {
+			cout << "closing device since no one is watching" << endl;
+			this->started = false;
+			lk.lock();
+		}
+
+		this->openCount = 0;
+		this_thread::sleep_for(chrono::seconds(1));
     }
 }
 
