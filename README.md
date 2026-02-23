@@ -1,4 +1,4 @@
-# kinect2pipe
+# kinect2pipe_IR
 A small application for piping output from libfreenect2 to a v4l2loopback device so the Kinect 2 can be used as a webcam
 in Linux.
 
@@ -28,11 +28,11 @@ You will need to have installed the `libswscale5` and `libfreenect2` packages in
 ## Installation
 
 If you're using Ubuntu you can grab the packages from
-[my PPA](https://launchpad.net/~swedishborgie/+archive/ubuntu/kinect2pipe). If you want to install from source (from
+[my PPA](https://launchpad.net/~swedishborgie/+archive/ubuntu/kinect2pipe_IR). If you want to install from source (from
 the build directory in the compiling step):
 
-    sudo cp kinect2pipe /usr/bin/kinect2pipe
-    cp ../contrib/systemd/kinect2pipe.service ~/.config/systemd/user/
+    sudo cp kinect2pipe_IR /usr/bin/kinect2pipe_IR
+    cp ../contrib/systemd/kinect2pipe_IR.service ~/.config/systemd/user/
     
 ## Configuration / Usage
 
@@ -50,11 +50,11 @@ Then add the following to `/etc/modprobe.d/v4l2loopback.conf`:
     options v4l2loopback devices=1 video_nr=0 card_label=Kinect2 exclusive_caps=1
 
 In the example above this should create a v4l2loopback device at `/dev/video0`. If you change the device number above
-make sure to modify `~/.config/systemd/user/kinect2pipe.service` to reflect the change. Then you can install and start
+make sure to modify `~/.config/systemd/user/kinect2pipe_IR.service` to reflect the change. Then you can install and start
 the service:
 
-    systemctl --user enable kinect2pipe
-    systemctl --user start kinect2pipe
+    systemctl --user enable kinect2pipe_IR
+    systemctl --user start kinect2pipe_IR
     
 You can then test everything is working using VLC (or any other V4L2 client):
 
@@ -62,3 +62,27 @@ You can then test everything is working using VLC (or any other V4L2 client):
     
 You should get video output:
 ![example snapshot](snapshot.png)
+
+```
+# 1. Enter the source directory
+cd src/libfreenect2
+
+# 2. Rename the conflicting variable in both OpenCL files
+sed -i 's/CL_ICDL_VERSION/MY_CL_ICDL_VERSION/g' src/opencl_depth_packet_processor.cpp
+sed -i 's/CL_ICDL_VERSION/MY_CL_ICDL_VERSION/g' src/opencl_kde_depth_packet_processor.cpp
+
+# 3. Go back to the AUR root folder
+cd ../..
+
+cd src/libfreenect2
+mkdir -p build && cd build
+
+# Run CMake with the policy fix
+cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_INSTALL_PREFIX=/usr ..
+
+# Compile with all cores
+make -j$(nproc)
+
+# Install
+sudo make install
+```

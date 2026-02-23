@@ -1,11 +1,11 @@
 [Unit]
-Description=Kinect2Pipe client for connecting libfreenect2 to v4l2loopback devices.
-Documentation=https://github.com/swedishborgie/kinect2pipe
+Description=kinect2pipe_IR client for connecting libfreenect2 IR source to v4l2loopback devices.
+Documentation=https://github.com/stignarnia/kinect2pipe_IR
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/kinect2pipe /dev/video0
+ExecStart=/usr/bin/kinect2pipe_IR /dev/video11
 Restart=always
 
 [Install]

@@ -1,5 +1,6 @@
-#ifndef KINECT2PIPE_KINECT2PIPE_H
-#define KINECT2PIPE_KINECT2PIPE_H
+#ifndef kinect2pipe_IR_kinect2pipe_IR_H
+#define kinect2pipe_IR_kinect2pipe_IR_H
+
 #include <libfreenect2/libfreenect2.hpp>
 #include <libfreenect2/frame_listener_impl.h>
 #include <thread>
@@ -9,155 +10,56 @@
 using namespace std;
 using namespace libfreenect2;
 
-// The base width and height for the Kinect 2 camera.
-#define KINECT2_IMAGE_WIDTH 1920
-#define KINECT2_IMAGE_HEIGHT 1080
+// Native IR resolution of Kinect v2
+#define KINECT2_IMAGE_WIDTH  512
+#define KINECT2_IMAGE_HEIGHT 424
 
-#define OUTPUT_WIDTH 1920
-#define OUTPUT_HEIGHT 1080
+#define OUTPUT_WIDTH  512
+#define OUTPUT_HEIGHT 424
 
-// The YUV420 buffer layout that V4L2 expects -- it expects Y first, followed by U, then V.
-// The Y length in the YUV420 buffer is the width times the height of the image.
-#define YUV_BUFFER_Y_LEN (OUTPUT_WIDTH * OUTPUT_HEIGHT)
-// The U and V length in the YUV420 buffer is half the width time half the height of the image.
-#define YUV_BUFFER_UV_LEN ((OUTPUT_WIDTH/2) * (OUTPUT_HEIGHT/2))
-// Total length of the YUV420 image.
-#define YUV_BUFFER_LEN (YUV_BUFFER_Y_LEN + (YUV_BUFFER_UV_LEN * 2))
+#define YUV_BUFFER_Y_LEN   (OUTPUT_WIDTH * OUTPUT_HEIGHT)
+#define YUV_BUFFER_UV_LEN  ((OUTPUT_WIDTH / 2) * (OUTPUT_HEIGHT / 2))
+#define YUV_BUFFER_LEN     (YUV_BUFFER_Y_LEN + (YUV_BUFFER_UV_LEN * 2))
 
-class Kinect2Pipe {
+// libfreenect2 IR frames are 32-bit float, values 0–65535.
+// We normalise to 0.0–1.0 before passing to sws_scale (AV_PIX_FMT_GRAYF32).
+#define IR_MAX_VALUE 65535.0f
+
+class kinect2pipe_IR {
 public:
-    /**
-     * Constructor, initializes the swscale library and gets ready to work.
-     */
-    explicit Kinect2Pipe();
-    /**
-     * openLoopback opens the v4l2loopback device writes the video metadata to the ioctl and writes a single blank
-     * frame. It then listens for applications opening handles to the device before starting the video stream.
-     * @param loopbackDev The path to the v4l2loopback device to open.
-     */
+    explicit kinect2pipe_IR();
     void openLoopback(const char* loopbackDev);
-    /**
-     * run waits until an application opens the v4l2loopback device and once it does it'll start the video stream.
-     */
     void run();
 
 private:
-    /**
-     * Reference to the libfreenect library.
-     */
-    Freenect2 freenect2;
-    /**
-     * The set of frames from the libfreenect2 library from the listener callback.
-     */
-    FrameMap frames;
-    /**
-     * File descriptor to the loopback device.
-     */
-    int v4l2Device;
-    /**
-     * Context for the swscale frame converter.
-     */
-    struct SwsContext* sws;
-    /**
-     * Source pointers for swscale conversion. Each index is associated with a different color plane of the image. Since
-     * the source from the Kinect 2 is always an RGB image converted from the JPEG stream from the camera there will
-     * always will only include a single plane.
-     */
-    uint8_t* srcPtr[4]{};
-    /**
-     * Source stride values for the source image. The libswscale library expects this to be the number of bytes in a
-     * single horizontal line. The source image from the Kinect is an RGB32 image with a single color plane so this
-     * should always be a single element with a width of: (image width * 4) (r, g, b, a).
-     */
-    int srcStride[4]{};
-    /**
-     * Destination pointers for the swscale conversion. Each index is associated with a different color plane in the
-     * destination image. Since we're converting to YUV420 we'll have three different color planes (Y, U, V). The
-     * v4l2loopback interface expects all three planes to be a contiguous byte array. The Y plane is YUV_BUFFER_Y_LEN
-     * long, while the U and V channels are YUV_BUFFER_UV_LEN long. There should be three pointers in this array.
-     */
-    uint8_t* dstPtr[4]{};
-    /**
-     * Destination stride values for each color plane in the destination image. This should be the number of bytes in
-     * a single horizontal line for the specified color plane (Y, U, V). The Y plane should be 1 byte per pixel, U and
-     * V are half resolution.
-     */
-    int dstStride[4]{};
-    /**
-     * The destination image buffer to write frames into.
-     */
-    uint8_t* imageBuffer;
-    /**
-     * This is the inotify watcher thread listening for events on the v4l2loopback device.
-     */
-    std::thread watcherThread;
-    /**
-     * The inotify handle for the v4l2loopback device.
-     */
-    int inotifyFd;
-    /**
-     * The watcher handle for the v4l2loopback device.
-     */
-    int watcherFd;
-    /**
-     * The number of open file handles to the v4l2loopback device. We'll exit when we hit zero for a period of time.
-     */
-    int openCount;
-    /**
-     * Mutex that's used to gate the start condition this mutex will release when a v4l2 client has attached to the
-     * v4l2loopback device.
-     */
-    mutex startMutex;
-    /**
-     * This start condition will be true when a client has attached to the v4l2loopback device.
-     */
-    condition_variable startCondition;
-    /**
-     * Whether or not we've started the video stream.
-     */
-    bool started;
+    Freenect2  freenect2;
+    FrameMap   frames;
+    int        v4l2Device;
 
-    /**
-     * openV4L2LoopbackDevice opens up the loopback device and writes the ioctl setting the stream parameters.
-     * @param loopbackDev Loopback device to open.
-     * @param width Width of the output video.
-     * @param height Height of the output video.
-     * @return True if everything goes well, false otherwise.
-     */
+    struct SwsContext* sws;
+
+    // Normalised float buffer (values in 0.0–1.0) used as sws source
+    float*    normBuf;
+
+    uint8_t*  srcPtr[4]{};
+    int       srcStride[4]{};
+    uint8_t*  dstPtr[4]{};
+    int       dstStride[4]{};
+
+    uint8_t*  imageBuffer;
+
+    std::thread             watcherThread;
+    int                     openCount;
+    mutex                   startMutex;
+    condition_variable      startCondition;
+    bool                    started;
+
     bool openV4L2LoopbackDevice(const char* loopbackDev, int width, int height);
-    /**
-     * openProcMonitorV4L2LoopbackDevice creates a thread that calls procMonitorV4L2LoopbackDevice that will check running processes
-	 * for any process which is using the v4l2loopback device.
-     * @param lookbackDev The loopback device to look out for.
-     * @return True if everything goes well, false otherwise.
-     */
     bool openProcMonitorV4L2LoopbackDevice(const char* loopbackDev);
-    /**
-     * openKinect2Device will open and read from a Kinect 2 device. This method will block and read from the device
-     * until shut down or an error occurs.
-     * @return True if exiting normally, false if an error occurred.
-     */
     bool openKinect2Device();
-    /**
-     * handleFrame will handle an RGB frame from the libfreenect2 library.
-     * @param frame Frame to convert and write to the v4l2loopback device.
-     * @return True if everything went well, false if there was a problem and we should abort.
-     */
     bool handleFrame(Frame* frame);
-    /**
-     * procMonitorV4L2LoopbackDevice method cycle through all currently running processes to determine if there are any symlinks to the v4l2loopback device
-	 * and will start up the Kinect frame listener when the video device gets opened.
-     */
     void procMonitorV4L2LoopbackDevice(const char* loopbackDev);
-    /**
-     * drainInotifyEvents will read from the inotify handle started in watchV4L2LoopbackDevice until there have been no
-     * events for two seconds. We do this because upon opening the inotify handle we can get old buffered events.
-     */
-    void drainInotifyEvents();
-    /**
-     * This method writes a blank frame to the v4l2loopback device.
-     */
     void writeBlankFrame();
 };
 
-#endif //KINECT2PIPE_KINECT2PIPE_H
+#endif // kinect2pipe_IR_kinect2pipe_IR_H
