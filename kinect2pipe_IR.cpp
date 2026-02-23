@@ -54,6 +54,7 @@ kinect2pipe_IR::kinect2pipe_IR() {
     this->dstStride[3] = 0;
 
     this->v4l2Device = 0;
+    this->started    = false;
     this->shouldStop = false;
 
     signal(SIGINT,  signalHandler);
@@ -64,9 +65,9 @@ kinect2pipe_IR::kinect2pipe_IR() {
 
 void kinect2pipe_IR::shutdown() {
     cout << "shutting down" << endl;
-    lock_guard<mutex> lk(this->stopMutex);
+    lock_guard<mutex> lk(this->cvMutex);
     this->shouldStop = true;
-    this->stopCondition.notify_one();
+    this->cv.notify_one();
 }
 
 void kinect2pipe_IR::openLoopback(const char* loopbackDev) {
@@ -116,17 +117,12 @@ void kinect2pipe_IR::inotifyWatcher(const char* loopbackDev) {
         exit(-1);
     }
 
-    // Watch ALL open and ALL close events so we can count every fd regardless
-    // of how the consumer opened the device (O_RDONLY, O_RDWR, O_WRONLY).
     if (inotify_add_watch(ifd, loopbackDev, IN_OPEN | IN_CLOSE_WRITE | IN_CLOSE_NOWRITE) < 0) {
         perror("inotify_add_watch");
         exit(-1);
     }
 
-    // Our own O_WRONLY fd is already open before the watch was registered,
-    // so it will NOT generate an IN_OPEN event — start count at 0 for consumers.
-    int  openCount   = 0;
-    bool everOpened  = false;
+    int openCount = 0;
 
     char buf[sizeof(struct inotify_event) + NAME_MAX + 1];
 
@@ -142,12 +138,16 @@ void kinect2pipe_IR::inotifyWatcher(const char* loopbackDev) {
 
         if (ev->mask & IN_OPEN) {
             openCount++;
-            everOpened = true;
             cout << "consumer opened device (count=" << openCount << ")" << endl;
+            if (openCount == 1) {
+                lock_guard<mutex> lk(this->cvMutex);
+                this->started = true;
+                this->cv.notify_one();
+            }
         } else if (ev->mask & (IN_CLOSE_WRITE | IN_CLOSE_NOWRITE)) {
             openCount--;
             cout << "consumer closed device (count=" << openCount << ")" << endl;
-            if (everOpened && openCount <= 0) {
+            if (openCount <= 0) {
                 cout << "last consumer gone, stopping" << endl;
                 this->shutdown();
                 close(ifd);
@@ -186,7 +186,7 @@ bool kinect2pipe_IR::openKinect2Device() {
 
     while (true) {
         {
-            unique_lock<mutex> lk(this->stopMutex);
+            unique_lock<mutex> lk(this->cvMutex);
             if (this->shouldStop) break;
         }
 
@@ -224,6 +224,15 @@ bool kinect2pipe_IR::handleFrame(Frame* frame) {
 }
 
 void kinect2pipe_IR::run() {
+    // Wait until a consumer opens the device, or until shutdown() is called
+    {
+        unique_lock<mutex> lk(this->cvMutex);
+        this->cv.wait(lk, [this]{ return this->started || this->shouldStop; });
+        if (this->shouldStop) {
+            exit(0);
+        }
+    }
+
     cout << "starting kinect2 IR capture" << endl;
     if (!this->openKinect2Device()) {
         exit(-1);

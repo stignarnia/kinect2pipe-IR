@@ -45,9 +45,10 @@ private:
     uint8_t* imageBuffer;
 
     std::thread        watcherThread;
-    mutex              stopMutex;
-    condition_variable stopCondition;
-    bool               shouldStop;
+    mutex              cvMutex;
+    condition_variable cv;
+    bool               started;    // first consumer opened
+    bool               shouldStop; // last consumer gone or signal
 
     bool openV4L2LoopbackDevice(const char* loopbackDev, int width, int height);
     bool openInotifyWatcher(const char* loopbackDev);
