@@ -10,7 +10,6 @@
 #include <dirent.h>
 #include <algorithm>
 #include <cstring>
-#include <chrono>
 #include "kinect2pipe_IR.h"
 
 extern "C" {
@@ -35,7 +34,6 @@ kinect2pipe_IR::kinect2pipe_IR() {
     this->srcPtr[0]    = reinterpret_cast<uint8_t*>(this->normBuf);
     this->srcStride[0] = KINECT2_IMAGE_WIDTH * sizeof(float);
 
-    // Main image buffer (what the pump thread reads and writes to v4l2)
     this->imageBuffer = (uint8_t*)calloc(1, YUV_BUFFER_LEN);
     this->dstPtr[0] = this->imageBuffer;
     this->dstPtr[1] = this->imageBuffer + YUV_BUFFER_Y_LEN;
@@ -47,64 +45,17 @@ kinect2pipe_IR::kinect2pipe_IR() {
     this->dstStride[2] = OUTPUT_WIDTH / 2;
     this->dstStride[3] = 0;
 
-    // Pre-built blank (black) YUV frame
-    this->blankBuffer = (uint8_t*)malloc(YUV_BUFFER_LEN);
-    memset(this->blankBuffer,                        0x10, YUV_BUFFER_Y_LEN);
-    memset(this->blankBuffer + YUV_BUFFER_Y_LEN,     0x80, YUV_BUFFER_UV_LEN * 2);
-
-    // Start imageBuffer as blank too
-    memcpy(this->imageBuffer, this->blankBuffer, YUV_BUFFER_LEN);
-
-    this->v4l2Device    = 0;
-    this->openCount     = 0;
-    this->started       = false;
-    this->kinectRunning = false;
+    this->v4l2Device = 0;
+    this->shouldStop = false;
 
     libfreenect2::setGlobalLogger(nullptr);
-}
-
-kinect2pipe_IR::~kinect2pipe_IR() {
-    free(this->normBuf);
-    free(this->imageBuffer);
-    free(this->blankBuffer);
-    if (this->sws) sws_freeContext(this->sws);
-}
-
-// ── Continuous pump: writes imageBuffer to the v4l2 device at ~30fps.
-// This ensures select() in consumer processes (OpenCV/Howdy) never times out,
-// regardless of whether the Kinect is actively streaming.
-void kinect2pipe_IR::framePump() {
-    using namespace chrono;
-    auto next = steady_clock::now();
-
-    while (true) {
-        next += microseconds(FRAME_INTERVAL_US);
-
-        {
-            lock_guard<mutex> lk(this->frameMutex);
-            write(this->v4l2Device, this->imageBuffer, YUV_BUFFER_LEN);
-        }
-
-        this_thread::sleep_until(next);
-    }
 }
 
 void kinect2pipe_IR::openLoopback(const char* loopbackDev) {
     if (!this->openV4L2LoopbackDevice(loopbackDev, OUTPUT_WIDTH, OUTPUT_HEIGHT)) {
         exit(1);
     }
-
-    // Write one initial blank frame, then start the pump thread
-    {
-        lock_guard<mutex> lk(this->frameMutex);
-        write(this->v4l2Device, this->blankBuffer, YUV_BUFFER_LEN);
-    }
-
-    // Start the keepalive pump BEFORE the watcher, so the device is
-    // immediately readable by any consumer (Howdy, VLC, ffplay…)
-    this->pumpThread = thread(&kinect2pipe_IR::framePump, this);
-    this->pumpThread.detach();
-
+    this->writeBlankFrame();
     if (!this->openProcMonitorV4L2LoopbackDevice(loopbackDev)) {
         exit(1);
     }
@@ -144,53 +95,60 @@ bool kinect2pipe_IR::openKinect2Device() {
     }
 
     dev = freenect2.openDefaultDevice();
+    if (!dev) {
+        cerr << "failed to open kinect2 device" << endl;
+        return false;
+    }
+
     dev->setIrAndDepthFrameListener(&listener);
 
     if (!dev->startStreams(false, true)) {
         cerr << "unable to start kinect2 ir stream" << endl;
+        dev->close();
         return false;
     }
 
-    this->kinectRunning = true;
+    cout << "kinect2 IR stream started" << endl;
 
-    while (this->started) {
-        if (!listener.waitForNewFrame(frames, 2000)) {
-            cerr << "timeout waiting for IR frame" << endl;
+    // Stream frames until the watcher tells us to stop
+    while (true) {
+        {
+            unique_lock<mutex> lk(this->stopMutex);
+            if (this->shouldStop) break;
+        }
+
+        if (!listener.waitForNewFrame(frames, 1000)) {
+            // waitForNewFrame timed out — check shouldStop and retry
+            continue;
+        }
+
+        if (!this->handleFrame(frames[Frame::Ir])) {
+            listener.release(frames);
             break;
         }
 
-        this->handleFrame(frames[Frame::Ir]);
         listener.release(frames);
     }
 
-    this->kinectRunning = false;
-
-    // Revert to blank frame; pump will keep writing it
-    {
-        lock_guard<mutex> lk(this->frameMutex);
-        memcpy(this->imageBuffer, this->blankBuffer, YUV_BUFFER_LEN);
-    }
-
+    cout << "stopping kinect2 IR stream" << endl;
+    this->writeBlankFrame();
     dev->stop();
     dev->close();
     return true;
 }
 
 bool kinect2pipe_IR::handleFrame(Frame* frame) {
-    // Normalise raw IR floats [0, 65535] → [0.0, 1.0] for AV_PIX_FMT_GRAYF32
     const float* src = reinterpret_cast<const float*>(frame->data);
     const int    n   = KINECT2_IMAGE_WIDTH * KINECT2_IMAGE_HEIGHT;
     for (int i = 0; i < n; ++i) {
         this->normBuf[i] = src[i] / IR_MAX_VALUE;
     }
 
-    // Scale into imageBuffer under the frame lock so the pump never
-    // writes a half-converted frame
-    lock_guard<mutex> lk(this->frameMutex);
     sws_scale(this->sws,
               this->srcPtr,  this->srcStride, 0, KINECT2_IMAGE_HEIGHT,
               this->dstPtr,  this->dstStride);
-    return true;
+
+    return write(this->v4l2Device, this->imageBuffer, YUV_BUFFER_LEN) > 0;
 }
 
 bool kinect2pipe_IR::openProcMonitorV4L2LoopbackDevice(const char* loopbackDev) {
@@ -200,14 +158,20 @@ bool kinect2pipe_IR::openProcMonitorV4L2LoopbackDevice(const char* loopbackDev) 
 }
 
 void kinect2pipe_IR::procMonitorV4L2LoopbackDevice(const char* loopbackDev) {
-    unique_lock<mutex> lk(this->startMutex);
-    // Wait until !started (initial state) — effectively a no-op on first run
-    this->startCondition.wait(lk, [this]{ return !this->started; });
-
     const string current_pid = to_string(getpid());
     const string target      = loopbackDev;
 
+    // Track whether we have ever seen a consumer.
+    // We don't start/stop the Kinect here — run() starts it immediately.
+    // Our only job: once we've seen at least one consumer come and then fully go,
+    // signal the stream loop to stop cleanly, then exit.
+    bool everSawConsumer = false;
+
     while (true) {
+        this_thread::sleep_for(chrono::seconds(1));
+
+        int consumers = 0;
+
         DIR* proc_dir = opendir("/proc");
         if (!proc_dir) {
             perror("opendir /proc");
@@ -237,46 +201,44 @@ void kinect2pipe_IR::procMonitorV4L2LoopbackDevice(const char* loopbackDev) {
                 link_target[len] = '\0';
 
                 if (target == link_target) {
-                    this->openCount++;
-                    if (!this->started) {
-                        this->started = true;
-                        lk.unlock();
-                        this->startCondition.notify_one();
-                    }
+                    consumers++;
                 }
             }
             closedir(fd_dir);
         }
         closedir(proc_dir);
 
-        if (this->openCount == 0 && this->started) {
-            cout << "closing IR device since no one is watching" << endl;
-            this->started = false;
-            lk.lock();
+        if (consumers > 0) {
+            everSawConsumer = true;
+        } else if (everSawConsumer) {
+            // Had a consumer, now gone — signal the stream loop to stop cleanly
+            cout << "last consumer gone, stopping" << endl;
+            {
+                lock_guard<mutex> lk(this->stopMutex);
+                this->shouldStop = true;
+            }
+            this->stopCondition.notify_one();
+            // run() will exit() after dev->stop()/close(), so we just return
+            return;
         }
-
-        this->openCount = 0;
-        this_thread::sleep_for(chrono::seconds(1));
     }
 }
 
 void kinect2pipe_IR::run() {
-    while (true) {
-        unique_lock<mutex> lk(this->startMutex);
-        this->startCondition.wait(lk, [this]{ return this->started; });
-        if (this->started) {
-            cout << "IR device opened, starting capture" << endl;
-            lk.unlock();
-            if (!this->openKinect2Device()) {
-                cerr << "openKinect2Device failed" << endl;
-                // Don't exit — keep the pump running so other consumers don't break
-                this->started = false;
-            }
-        }
+    // Start streaming immediately — don't wait for a consumer.
+    // The Kinect must be hot and writing frames BEFORE howdy opens the device,
+    // otherwise cv2.VideoCapture.grab() fails and howdy never registers as a consumer.
+    cout << "starting kinect2 IR capture" << endl;
+    if (!this->openKinect2Device()) {
+        exit(-1);
     }
+    // openKinect2Device returned cleanly (shouldStop was set by watcher).
+    // Let systemd restart us.
+    exit(0);
 }
 
 void kinect2pipe_IR::writeBlankFrame() {
-    lock_guard<mutex> lk(this->frameMutex);
-    write(this->v4l2Device, this->blankBuffer, YUV_BUFFER_LEN);
+    memset(this->imageBuffer,                    0x10, YUV_BUFFER_Y_LEN);
+    memset(this->imageBuffer + YUV_BUFFER_Y_LEN, 0x80, YUV_BUFFER_UV_LEN * 2);
+    write(this->v4l2Device, this->imageBuffer, YUV_BUFFER_LEN);
 }
