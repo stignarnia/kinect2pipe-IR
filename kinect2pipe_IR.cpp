@@ -3,12 +3,12 @@
 #include <libfreenect2/libfreenect2.hpp>
 #include <libfreenect2/frame_listener_impl.h>
 #include <linux/videodev2.h>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <csignal>
 #include <thread>
-#include <dirent.h>
-#include <algorithm>
 #include <cstring>
 #include "kinect2pipe_IR.h"
 
@@ -20,7 +20,15 @@ extern "C" {
 using namespace std;
 using namespace libfreenect2;
 
+static kinect2pipe_IR* g_instance = nullptr;
+
+static void signalHandler(int) {
+    if (g_instance) g_instance->shutdown();
+}
+
 kinect2pipe_IR::kinect2pipe_IR() {
+    g_instance = this;
+
     this->normBuf = (float*)malloc(KINECT2_IMAGE_WIDTH * KINECT2_IMAGE_HEIGHT * sizeof(float));
 
     this->sws = sws_getContext(
@@ -48,7 +56,17 @@ kinect2pipe_IR::kinect2pipe_IR() {
     this->v4l2Device = 0;
     this->shouldStop = false;
 
+    signal(SIGINT,  signalHandler);
+    signal(SIGTERM, signalHandler);
+
     libfreenect2::setGlobalLogger(nullptr);
+}
+
+void kinect2pipe_IR::shutdown() {
+    cout << "shutting down" << endl;
+    lock_guard<mutex> lk(this->stopMutex);
+    this->shouldStop = true;
+    this->stopCondition.notify_one();
 }
 
 void kinect2pipe_IR::openLoopback(const char* loopbackDev) {
@@ -56,7 +74,7 @@ void kinect2pipe_IR::openLoopback(const char* loopbackDev) {
         exit(1);
     }
     this->writeBlankFrame();
-    if (!this->openProcMonitorV4L2LoopbackDevice(loopbackDev)) {
+    if (!this->openInotifyWatcher(loopbackDev)) {
         exit(1);
     }
 }
@@ -85,6 +103,62 @@ bool kinect2pipe_IR::openV4L2LoopbackDevice(const char* loopbackDev, int width, 
     return true;
 }
 
+bool kinect2pipe_IR::openInotifyWatcher(const char* loopbackDev) {
+    this->watcherThread = thread(&kinect2pipe_IR::inotifyWatcher, this, loopbackDev);
+    this->watcherThread.detach();
+    return true;
+}
+
+void kinect2pipe_IR::inotifyWatcher(const char* loopbackDev) {
+    int ifd = inotify_init();
+    if (ifd < 0) {
+        perror("inotify_init");
+        exit(-1);
+    }
+
+    // Watch ALL open and ALL close events so we can count every fd regardless
+    // of how the consumer opened the device (O_RDONLY, O_RDWR, O_WRONLY).
+    if (inotify_add_watch(ifd, loopbackDev, IN_OPEN | IN_CLOSE_WRITE | IN_CLOSE_NOWRITE) < 0) {
+        perror("inotify_add_watch");
+        exit(-1);
+    }
+
+    // Our own O_WRONLY fd is already open before the watch was registered,
+    // so it will NOT generate an IN_OPEN event — start count at 0 for consumers.
+    int  openCount   = 0;
+    bool everOpened  = false;
+
+    char buf[sizeof(struct inotify_event) + NAME_MAX + 1];
+
+    while (true) {
+        ssize_t len = read(ifd, buf, sizeof(buf));
+        if (len < 0) {
+            if (errno == EINTR) continue;
+            perror("inotify read");
+            break;
+        }
+
+        const struct inotify_event* ev = reinterpret_cast<const struct inotify_event*>(buf);
+
+        if (ev->mask & IN_OPEN) {
+            openCount++;
+            everOpened = true;
+            cout << "consumer opened device (count=" << openCount << ")" << endl;
+        } else if (ev->mask & (IN_CLOSE_WRITE | IN_CLOSE_NOWRITE)) {
+            openCount--;
+            cout << "consumer closed device (count=" << openCount << ")" << endl;
+            if (everOpened && openCount <= 0) {
+                cout << "last consumer gone, stopping" << endl;
+                this->shutdown();
+                close(ifd);
+                return;
+            }
+        }
+    }
+
+    close(ifd);
+}
+
 bool kinect2pipe_IR::openKinect2Device() {
     SyncMultiFrameListener listener(Frame::Ir);
     Freenect2Device* dev;
@@ -110,7 +184,6 @@ bool kinect2pipe_IR::openKinect2Device() {
 
     cout << "kinect2 IR stream started" << endl;
 
-    // Stream frames until the watcher tells us to stop
     while (true) {
         {
             unique_lock<mutex> lk(this->stopMutex);
@@ -118,7 +191,6 @@ bool kinect2pipe_IR::openKinect2Device() {
         }
 
         if (!listener.waitForNewFrame(frames, 1000)) {
-            // waitForNewFrame timed out — check shouldStop and retry
             continue;
         }
 
@@ -151,89 +223,11 @@ bool kinect2pipe_IR::handleFrame(Frame* frame) {
     return write(this->v4l2Device, this->imageBuffer, YUV_BUFFER_LEN) > 0;
 }
 
-bool kinect2pipe_IR::openProcMonitorV4L2LoopbackDevice(const char* loopbackDev) {
-    this->watcherThread = thread(&kinect2pipe_IR::procMonitorV4L2LoopbackDevice, this, loopbackDev);
-    this->watcherThread.detach();
-    return true;
-}
-
-void kinect2pipe_IR::procMonitorV4L2LoopbackDevice(const char* loopbackDev) {
-    const string current_pid = to_string(getpid());
-    const string target      = loopbackDev;
-
-    // Track whether we have ever seen a consumer.
-    // We don't start/stop the Kinect here — run() starts it immediately.
-    // Our only job: once we've seen at least one consumer come and then fully go,
-    // signal the stream loop to stop cleanly, then exit.
-    bool everSawConsumer = false;
-
-    while (true) {
-        this_thread::sleep_for(chrono::seconds(1));
-
-        int consumers = 0;
-
-        DIR* proc_dir = opendir("/proc");
-        if (!proc_dir) {
-            perror("opendir /proc");
-            exit(-1);
-        }
-
-        struct dirent* entry;
-        while ((entry = readdir(proc_dir)) != nullptr) {
-            string pid_str(entry->d_name);
-            if (!all_of(pid_str.begin(), pid_str.end(), ::isdigit)) continue;
-            if (pid_str == current_pid) continue;
-
-            string fd_dir_path = "/proc/" + pid_str + "/fd";
-            DIR*   fd_dir      = opendir(fd_dir_path.c_str());
-            if (!fd_dir) continue;
-
-            struct dirent* fd_entry;
-            while ((fd_entry = readdir(fd_dir)) != nullptr) {
-                if (strcmp(fd_entry->d_name, ".") == 0 ||
-                    strcmp(fd_entry->d_name, "..") == 0)
-                    continue;
-
-                string  fd_path = fd_dir_path + "/" + fd_entry->d_name;
-                char    link_target[PATH_MAX];
-                ssize_t len = readlink(fd_path.c_str(), link_target, sizeof(link_target) - 1);
-                if (len == -1) continue;
-                link_target[len] = '\0';
-
-                if (target == link_target) {
-                    consumers++;
-                }
-            }
-            closedir(fd_dir);
-        }
-        closedir(proc_dir);
-
-        if (consumers > 0) {
-            everSawConsumer = true;
-        } else if (everSawConsumer) {
-            // Had a consumer, now gone — signal the stream loop to stop cleanly
-            cout << "last consumer gone, stopping" << endl;
-            {
-                lock_guard<mutex> lk(this->stopMutex);
-                this->shouldStop = true;
-            }
-            this->stopCondition.notify_one();
-            // run() will exit() after dev->stop()/close(), so we just return
-            return;
-        }
-    }
-}
-
 void kinect2pipe_IR::run() {
-    // Start streaming immediately — don't wait for a consumer.
-    // The Kinect must be hot and writing frames BEFORE howdy opens the device,
-    // otherwise cv2.VideoCapture.grab() fails and howdy never registers as a consumer.
     cout << "starting kinect2 IR capture" << endl;
     if (!this->openKinect2Device()) {
         exit(-1);
     }
-    // openKinect2Device returned cleanly (shouldStop was set by watcher).
-    // Let systemd restart us.
     exit(0);
 }
 

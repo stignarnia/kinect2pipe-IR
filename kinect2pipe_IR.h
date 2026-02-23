@@ -27,6 +27,7 @@ public:
     explicit kinect2pipe_IR();
     void openLoopback(const char* loopbackDev);
     void run();
+    void shutdown();
 
 private:
     Freenect2        freenect2;
@@ -46,13 +47,13 @@ private:
     std::thread        watcherThread;
     mutex              stopMutex;
     condition_variable stopCondition;
-    bool               shouldStop;   // set true by watcher when last consumer gone
+    bool               shouldStop;
 
     bool openV4L2LoopbackDevice(const char* loopbackDev, int width, int height);
-    bool openProcMonitorV4L2LoopbackDevice(const char* loopbackDev);
+    bool openInotifyWatcher(const char* loopbackDev);
     bool openKinect2Device();
     bool handleFrame(Frame* frame);
-    void procMonitorV4L2LoopbackDevice(const char* loopbackDev);
+    void inotifyWatcher(const char* loopbackDev);
     void writeBlankFrame();
 };
 
