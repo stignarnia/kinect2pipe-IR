@@ -8,9 +8,27 @@ pkg_check_modules(libswscale REQUIRED IMPORTED_TARGET libswscale)
 pkg_check_modules(freenect2 REQUIRED IMPORTED_TARGET freenect2)
 
 add_executable(kinect2pipe_IR kinect2pipe_IR.cpp main.cpp)
-target_include_directories(kinect2pipe_IR PRIVATE ${freenect2_INCLUDE_DIRS} ${libswscale_INCLUDE_DIRS})
-target_link_directories(kinect2pipe_IR PRIVATE ${freenect2_LIBRARY_DIRS} {libswscale_LIBRARY_DIRS})
-target_link_libraries(kinect2pipe_IR ${freenect2_LIBRARIES} ${libswscale_LIBRARIES} pthread)
 
-INSTALL(TARGETS kinect2pipe_IR DESTINATION ${CMAKE_INSTALL_BINDIR})
-INSTALL(FILES "${CMAKE_SOURCE_DIR}/contrib/systemd/kinect2pipe_IR.service" DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/systemd/system)
+target_link_libraries(kinect2pipe_IR PRIVATE
+    PkgConfig::freenect2
+    PkgConfig::libswscale
+    pthread
+)
+
+# installation rules -------------------------------------------------------
+install(TARGETS kinect2pipe_IR
+    RUNTIME DESTINATION bin
+)
+
+# configure systemd service unit so that the executable path matches the
+# installation prefix. The @CMAKE_INSTALL_PREFIX@ placeholder is substituted
+# when configure_file is invoked during the generate step.
+configure_file(
+    "${CMAKE_SOURCE_DIR}/contrib/systemd/kinect2pipe_IR.service"
+    "${CMAKE_CURRENT_BINARY_DIR}/kinect2pipe_IR.service"
+    @ONLY
+)
+
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/kinect2pipe_IR.service"
+    DESTINATION "$ENV{HOME}/.config/systemd/user"
+)

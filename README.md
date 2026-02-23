@@ -67,27 +67,21 @@ git clone https://github.com/stignarnia/kinect2pipe-IR
 cd kinect2pipe-IR
 ```
 
-2. Compile the application:
+2. Compile and install the application:
 ```bash
 mkdir -p build && cd build
 cmake ..
-make
+sudo make install
 ```
 
-### Installing
+### Configuring
 
-1. Copy the binary to a location in your `PATH` and copy the systemd service file to your user systemd directory:
-```bash
-sudo cp kinect2pipe_IR /usr/bin/kinect2pipe_IR
-cp ../contrib/systemd/kinect2pipe_IR.service ~/.config/systemd/user/
-```
-
-2. **Skip this step if you already installed the [RGB version](https://github.com/swedishborgie/kinect2pipe)** Load the `video4l2loopback` kernel module at boot with the following command:
+1. **Skip this step if you already installed the [RGB version](https://github.com/swedishborgie/kinect2pipe)** Load the `video4l2loopback` kernel module at boot with the following command:
 ```bash
 echo "v4l2loopback" | sudo tee /etc/modules-load.d/kinect.conf
 ```
 
-3. Create the v4l2loopback virtual devices at boot with the following command:
+2. Create the v4l2loopback virtual devices at boot with the following command:
 ```bash
 # If you have the RGB version (this will put it on /dev/video10, change that number to what you had it before if needed). You can also change the number 11 or the card_label if you want:
 sudo rm /etc/modprobe.d/v4l2loopback.conf
@@ -97,16 +91,16 @@ echo 'options v4l2loopback devices=2 video_nr=10,11 card_label="Kinect RGB","Kin
 echo 'options v4l2loopback video_nr=11 card_label="Kinect IR" exclusive_caps=1 max_buffers=2' | sudo tee /etc/modprobe.d/kinect_IR.conf
 ```
 
-4. Reboot
+3. Reboot
 
-5. If you changed the number 11 on the previous step:
+4. If you changed the number 11 on the previous step:
 ```bash
 nano ~/.config/systemd/user/kinect2pipe_IR.service
 
 # Change the line that starts with "ExecStart=" to reflect the change.
 ```
 
-6. You can then enable and start the service with:
+5. You can then enable and start the service with:
 ```bash
 systemctl --user enable kinect2pipe_IR --now
 ```
