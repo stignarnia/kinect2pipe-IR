@@ -17,11 +17,11 @@ intensive, it will only start the stream when client applications open a file ha
 
 ### Prerequisites
 
-#### Installing the compiler, CMake and OpenCL headers
+#### Installing dependencies
 
 This varies by distribution. On Arch:
 ```bash
-sudo pacman -S --needed base-devel cmake opencl-headers git
+sudo pacman -S --needed base-devel cmake opencl-headers git glfw
 ```
 
 #### Installing libfreenect2
