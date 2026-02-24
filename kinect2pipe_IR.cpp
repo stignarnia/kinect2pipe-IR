@@ -105,7 +105,11 @@ void kinect2pipe_IR::setBackupDevice(const char* dev) {
 }
 
 bool kinect2pipe_IR::openV4L2LoopbackDevice(const char* loopbackDev, int width, int height) {
-    this->v4l2Device = open(loopbackDev, O_WRONLY);
+    // Open with O_NONBLOCK so that write() returns EAGAIN instead of blocking
+    // when no capture reader has called VIDIOC_STREAMON.  This lets us detect
+    // passive openers (e.g. Chrome enumerating devices) and shut down after
+    // IDLE_SHUTDOWN_SECONDS rather than running forever.
+    this->v4l2Device = open(loopbackDev, O_WRONLY | O_NONBLOCK);
     if (this->v4l2Device < 0) {
         cerr << "failed to open v4l2loopback device: " << errno << endl;
         return false;
@@ -215,6 +219,12 @@ bool kinect2pipe_IR::openKinect2Device() {
     const int  maxMissed  = 5;
     int        missedCount = 0;
 
+    // Seed the idle timer.  If no frame is successfully delivered to a
+    // streaming consumer within IDLE_SHUTDOWN_SECONDS the loop will break,
+    // allowing the process to exit.  This prevents passive openers (e.g.
+    // Chrome enumerating devices) from keeping the Kinect running forever.
+    this->lastSuccessWrite = std::chrono::steady_clock::now();
+
     while (true) {
         {
             unique_lock<mutex> lk(this->cvMutex);
@@ -235,7 +245,18 @@ bool kinect2pipe_IR::openKinect2Device() {
             break;
         }
 
+        // Shut down if no active consumer has been reading frames for a while.
+        auto idleSecs = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - this->lastSuccessWrite).count();
+        bool idleTimeout = (idleSecs >= IDLE_SHUTDOWN_SECONDS);
+
         listener.release(frames);
+
+        if (idleTimeout) {
+            cout << "no active consumer for " << IDLE_SHUTDOWN_SECONDS
+                 << "s, stopping" << endl;
+            break;
+        }
     }
 
     cout << "stopping kinect2 IR stream" << endl;
@@ -266,7 +287,19 @@ bool kinect2pipe_IR::handleFrame(Frame* frame) {
               this->srcPtr,  this->srcStride, 0, KINECT2_IMAGE_HEIGHT,
               this->dstPtr,  this->dstStride);
 
-    return write(this->v4l2Device, this->imageBuffer, YUV_BUFFER_LEN) > 0;
+    ssize_t written = write(this->v4l2Device, this->imageBuffer, YUV_BUFFER_LEN);
+    if (written > 0) {
+        // Frame delivered to at least one streaming consumer.
+        this->lastSuccessWrite = std::chrono::steady_clock::now();
+        return true;
+    }
+    if (written < 0 && errno == EAGAIN) {
+        // No consumer has called VIDIOC_STREAMON yet (or all have called
+        // STREAMOFF).  This is not a fatal error; the idle timeout in the
+        // caller will decide when to give up.
+        return true;
+    }
+    return false;
 }
 
 bool kinect2pipe_IR::openBackupDevice() {
@@ -371,6 +404,9 @@ bool kinect2pipe_IR::openBackupDevice() {
 
     static const int BACKUP_SELECT_TIMEOUT_S = 1;
 
+    // Seed the idle timer (same logic as openKinect2Device).
+    this->lastSuccessWrite = std::chrono::steady_clock::now();
+
     bool ok = true;
     while (true) {
         {
@@ -387,7 +423,17 @@ bool kinect2pipe_IR::openBackupDevice() {
             if (errno == EINTR) continue;
             ok = false; break;
         }
-        if (r == 0) continue; // timeout – re-check shouldStop
+        if (r == 0) {
+            // Timeout – re-check shouldStop and idle.
+            auto idleSecs = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - this->lastSuccessWrite).count();
+            if (idleSecs >= IDLE_SHUTDOWN_SECONDS) {
+                cout << "no active consumer for " << IDLE_SHUTDOWN_SECONDS
+                     << "s, stopping backup" << endl;
+                break;
+            }
+            continue;
+        }
 
         struct v4l2_buffer buf{};
         buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -437,9 +483,13 @@ bool kinect2pipe_IR::openBackupDevice() {
 
         if (ioctl(fd, VIDIOC_QBUF, &buf) < 0) { ok = false; break; }
 
-        if (write(this->v4l2Device, this->imageBuffer, YUV_BUFFER_LEN) < 0) {
+        ssize_t written = write(this->v4l2Device, this->imageBuffer, YUV_BUFFER_LEN);
+        if (written > 0) {
+            this->lastSuccessWrite = std::chrono::steady_clock::now();
+        } else if (written < 0 && errno != EAGAIN) {
             ok = false; break;
         }
+        // On EAGAIN the idle check at the top of the loop will handle shutdown.
     }
 
     sws_freeContext(backupSws);
