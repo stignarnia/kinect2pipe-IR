@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <csignal>
 #include <thread>
+#include <chrono>
 #include <cstring>
 #include <vector>
 #include "kinect2pipe_IR.h"
@@ -59,6 +60,7 @@ kinect2pipe_IR::kinect2pipe_IR() {
     this->v4l2Device = 0;
     this->started    = false;
     this->shouldStop = false;
+    this->cleanupComplete.store(false);
 
     signal(SIGINT,  signalHandler);
     signal(SIGTERM, signalHandler);
@@ -66,8 +68,23 @@ kinect2pipe_IR::kinect2pipe_IR() {
     libfreenect2::setGlobalLogger(nullptr);
 }
 
+// Schedule a hard kill two seconds after shutdown is first requested. This is needed for when the Kinect is disconnecteded while a client is still connected to the loopback device.
+// This is a separate thread to avoid it never being reached when the main thread is trying to gracefully shut down a non existent device.
 void kinect2pipe_IR::shutdown() {
     cout << "shutting down" << endl;
+
+    static std::once_flag killFlag;
+    std::call_once(killFlag, [this]{
+        std::thread([this]{
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            // only send SIGKILL if the cleanup hasn't completed yet
+            if (!this->cleanupComplete.load()) {
+                // SIGKILL cannot be caught or ignored, so this will unconditionally terminate the process.
+                ::kill(::getpid(), SIGKILL);
+            }
+        }).detach();
+    });
+
     lock_guard<mutex> lk(this->cvMutex);
     this->shouldStop = true;
     this->cv.notify_one();
@@ -223,16 +240,18 @@ bool kinect2pipe_IR::openKinect2Device() {
 
     cout << "stopping kinect2 IR stream" << endl;
     this->writeBlankFrame();
-    // Run stop/close in a detached thread: libfreenect2 can block indefinitely
-    // when the USB device has been yanked or when the system is shutting down.
-    // Detaching lets the main thread proceed to the backup device (or exit)
-    // without hanging, and the OS will reap the thread when the process exits.
-    // `dev` is managed by libfreenect2 internally; close() is its release call,
-    // so the pointer remains valid until that call completes in the thread.
-    thread([dev]{
-        try { dev->stop(); dev->close(); }
-        catch (...) { cerr << "kinect2 cleanup thread caught exception" << endl; }
-    }).detach();
+
+    // perform the cleanup on the calling thread so we can observe completion
+    // within the two‑second window that shutdown() allows for graceful exit.
+    try {
+        dev->stop();
+        dev->close();
+    } catch (...) {
+        cerr << "kinect2 cleanup caught exception" << endl;
+    }
+
+    // mark cleanup done so the scheduled SIGKILL won't fire
+    this->cleanupComplete.store(true);
     return true;
 }
 

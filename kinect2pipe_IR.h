@@ -7,6 +7,7 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <atomic>
 
 using namespace std;
 using namespace libfreenect2;
@@ -53,6 +54,7 @@ private:
     condition_variable cv;
     bool               started;    // first consumer opened
     bool               shouldStop; // last consumer gone or signal
+    std::atomic<bool>  cleanupComplete; // set when device shutdown finished
 
     bool openV4L2LoopbackDevice(const char* loopbackDev, int width, int height);
     bool openInotifyWatcher(const char* loopbackDev);
