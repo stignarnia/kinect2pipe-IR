@@ -11,7 +11,7 @@ conversion to YUV420P which is a much more generally supported format by linux a
 Then, it will stream the frames to a virtual video device that basically any app can easily read by looking at `/dev/videoX` (where X is the number of the device, it will be 11 if you follow the instructions in this guide).
 Since this program is quite CPU
 intensive, it will only start the stream when client applications open a file handle to the
-`v4l2loopback` device and will close the video stream when all handles are closed. It uses `inotify` to achieve this.
+`v4l2loopback` device and will close the video stream when any handle is closed (this may be an issue if there are two consumers but usually it's good because it usually manages to shut itself down even if some system service or browser forgets to let go). It uses `inotify` to achieve this.
 
 ## Instructions
 
@@ -66,7 +66,7 @@ pacman -Qs libswscale
 echo "v4l2loopback" | sudo tee /etc/modules-load.d/kinect.conf
 ```
 
-2. Create the v4l2loopback virtual devices at boot with the following command:
+2. Create the v4l2loopback virtual devices at boot with the following command. We are not setting `exclusive_caps=1 max_buffers=2` which are needed for browsers to see the device. This is because they open handles at boot and never release them, so the IR emitter would be on all the time. Change if needed:
 ```bash
 # If you have the RGB version (this will put it on /dev/video10, change that number to what you had it before if needed). You can also change the number 11 or the card_label if you want:
 sudo rm /etc/modprobe.d/v4l2loopback.conf

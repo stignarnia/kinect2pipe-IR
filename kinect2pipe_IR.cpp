@@ -146,8 +146,6 @@ void kinect2pipe_IR::inotifyWatcher(const char* loopbackDev) {
         exit(-1);
     }
 
-    int openCount = 0;
-
     char buf[sizeof(struct inotify_event) + NAME_MAX + 1];
 
     while (true) {
@@ -161,22 +159,15 @@ void kinect2pipe_IR::inotifyWatcher(const char* loopbackDev) {
         const struct inotify_event* ev = reinterpret_cast<const struct inotify_event*>(buf);
 
         if (ev->mask & IN_OPEN) {
-            openCount++;
-            cout << "consumer opened device (count=" << openCount << ")" << endl;
-            if (openCount == 1) {
-                lock_guard<mutex> lk(this->cvMutex);
-                this->started = true;
-                this->cv.notify_one();
-            }
+            cout << "consumer opened device" << endl;
+            lock_guard<mutex> lk(this->cvMutex);
+            this->started = true;
+            this->cv.notify_one();
         } else if (ev->mask & (IN_CLOSE_WRITE | IN_CLOSE_NOWRITE)) {
-            openCount--;
-            cout << "consumer closed device (count=" << openCount << ")" << endl;
-            if (openCount <= 0) {
-                cout << "last consumer gone, stopping" << endl;
-                this->shutdown();
-                close(ifd);
-                return;
-            }
+            cout << "consumer closed device, shutting down" << endl;
+            this->shutdown();
+            close(ifd);
+            return;
         }
     }
 
