@@ -56,7 +56,7 @@ endif()
 # @LOOPBACK_ARG@ and @BACKUP_ARG@ placeholders are substituted when
 # configure_file is invoked during the generate step.
 configure_file(
-    "${CMAKE_SOURCE_DIR}/contrib/systemd/kinect2pipe_IR.service"
+    "${CMAKE_SOURCE_DIR}/kinect2pipe_IR.service"
     "${CMAKE_CURRENT_BINARY_DIR}/kinect2pipe_IR.service"
     @ONLY
 )
