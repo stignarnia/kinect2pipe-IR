@@ -30,6 +30,15 @@ option(BACKUP_PATH "path passed to kinect2pipe_IR via --backup" "")
 # overridden precisely the same way as BACKUP_PATH
 option(LOOPBACK_DEVICE "v4l2loopback device path for service ExecStart" "/dev/video11")
 
+# options for systemd User/Group substitution. These can be set at
+# configuration time with -DSERVICE_USER=username -DSERVICE_GROUP=group
+# Default SERVICE_USER is taken from the build environment $ENV{USER}
+set(SERVICE_USER "$ENV{USER}" CACHE STRING "User for systemd service (replaces @SERVICE_USER@ in service file)")
+set(SERVICE_GROUP "" CACHE STRING "Group for systemd service (replaces @SERVICE_GROUP@ in service file)")
+if(NOT SERVICE_GROUP)
+    set(SERVICE_GROUP "${SERVICE_USER}")
+endif()
+
 # build the actual strings we will substitute into the service file;
 # both the loopback device and backup argument are injected. The loopback
 # argument always has a value (defaults to /dev/video11), whereas the
@@ -53,5 +62,33 @@ configure_file(
 )
 
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/kinect2pipe_IR.service"
-    DESTINATION "$ENV{HOME}/.config/systemd/user"
+    DESTINATION "/etc/systemd/system"
 )
+
+# attempt to reload and enable the systemd unit automatically at install time.
+# These commands require appropriate privileges (typically root). If systemctl
+# is not available or the commands fail, a warning will be emitted but the
+# install will not be aborted.
+find_program(SYSTEMCTL_EXECUTABLE systemctl)
+if(SYSTEMCTL_EXECUTABLE)
+    install(CODE "execute_process(COMMAND ${SYSTEMCTL_EXECUTABLE} daemon-reload
+        RESULT_VARIABLE _sysctl_res1
+        OUTPUT_QUIET ERROR_QUIET)
+    if(NOT _sysctl_res1 EQUAL 0)
+        message(WARNING \\\"systemctl daemon-reload failed with ${_sysctl_res1}\\\")
+    endif()
+    execute_process(COMMAND ${SYSTEMCTL_EXECUTABLE} enable --now kinect2pipe_IR
+        RESULT_VARIABLE _sysctl_res2
+        OUTPUT_QUIET ERROR_QUIET)
+    if(NOT _sysctl_res2 EQUAL 0)
+        message(WARNING \\\"systemctl enable --now kinect2pipe_IR failed with ${_sysctl_res2}\\\")
+    endif()
+    execute_process(COMMAND ${SYSTEMCTL_EXECUTABLE} restart kinect2pipe_IR
+        RESULT_VARIABLE _sysctl_res3
+        OUTPUT_QUIET ERROR_QUIET)
+    if(NOT _sysctl_res3 EQUAL 0)
+        message(WARNING \\\"systemctl restart kinect2pipe_IR failed with ${_sysctl_res3}\\\")
+    endif()")
+else()
+    message(WARNING "systemctl not found; skipping service daemon-reload/enable/restart")
+endif()

@@ -59,21 +59,6 @@ This varies by distribution. On Arch, it should already be installed as a depend
 pacman -Qs libswscale
 ```
 
-### Compiling
-
-1. Clone this repository:
-```bash
-git clone https://github.com/stignarnia/kinect2pipe-IR
-cd kinect2pipe-IR
-```
-
-2. Compile and install the application. You can change the number 11 if you want to find the IR camera on a different path:
-```bash
-mkdir -p build && cd build
-cmake -DLOOPBACK_DEVICE=/dev/video11 ..
-sudo make install
-```
-
 ### Configuring
 
 1. **Skip this step if you already installed the [RGB version](https://github.com/swedishborgie/kinect2pipe)** Load the `video4l2loopback` kernel module at boot with the following command:
@@ -83,20 +68,30 @@ echo "v4l2loopback" | sudo tee /etc/modules-load.d/kinect.conf
 
 2. Create the v4l2loopback virtual devices at boot with the following command:
 ```bash
-# If you have the RGB version (this will put it on /dev/video10, change that number to what you had it before if needed). You can also change the number 11 if you did it above or the card_label if you want:
+# If you have the RGB version (this will put it on /dev/video10, change that number to what you had it before if needed). You can also change the number 11 or the card_label if you want:
 sudo rm /etc/modprobe.d/v4l2loopback.conf
 echo 'options v4l2loopback devices=1 video_nr=10 card_label=Kinect_RGB exclusive_caps=1 max_buffers=2
 options v4l2loopback devices=1 video_nr=11 card_label=Kinect_IR' | sudo tee /etc/modprobe.d/kinect.conf
 
-# If you don't have the RGB version. You can change the number 11 if you did it above or the card_label if you want:
+# If you don't have the RGB version. You can change the number 11 or the card_label if you want:
 echo 'options v4l2loopback video_nr=11 card_label=Kinect_IR' | sudo tee /etc/modprobe.d/kinect_IR.conf
 ```
 
 3. Reboot
 
-4. You can then enable and start the service with:
+### Compiling
+
+1. Clone this repository:
 ```bash
-systemctl --user enable kinect2pipe_IR --now
+git clone https://github.com/stignarnia/kinect2pipe-IR
+cd kinect2pipe-IR
+```
+
+2. Compile and install the application. You can change the number 11 if you did it in the configuration step:
+```bash
+mkdir -p build && cd build
+cmake -DLOOPBACK_DEVICE=/dev/video11 ..
+sudo make install
 ```
 
 ### Usage
@@ -117,8 +112,6 @@ You can pass a second argument pointing to a regular V4L2 capture device. When t
 ```bash
 cmake -DLOOPBACK_DEVICE=/dev/video11 -DBACKUP_PATH=/dev/<yourdevice> ..
 sudo make install
-systemctl --user daemon-reload
-systemctl --user restart kinect2pipe_IR
 ```
 
 The backup device should output one of the following pixel formats (tried in preference order): YUYV, UYVY, YUV420, NV12, BGR24, RGB24. Frames are scaled to 512 × 424 with bilinear interpolation before being written to the loopback device.

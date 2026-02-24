@@ -5,8 +5,10 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
 ExecStart=@CMAKE_INSTALL_PREFIX@/bin/kinect2pipe_IR @LOOPBACK_ARG@ @BACKUP_ARG@
 Restart=always
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
