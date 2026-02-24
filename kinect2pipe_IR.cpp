@@ -223,8 +223,16 @@ bool kinect2pipe_IR::openKinect2Device() {
 
     cout << "stopping kinect2 IR stream" << endl;
     this->writeBlankFrame();
-    dev->stop();
-    dev->close();
+    // Run stop/close in a detached thread: libfreenect2 can block indefinitely
+    // when the USB device has been yanked or when the system is shutting down.
+    // Detaching lets the main thread proceed to the backup device (or exit)
+    // without hanging, and the OS will reap the thread when the process exits.
+    // `dev` is managed by libfreenect2 internally; close() is its release call,
+    // so the pointer remains valid until that call completes in the thread.
+    thread([dev]{
+        try { dev->stop(); dev->close(); }
+        catch (...) { cerr << "kinect2 cleanup thread caught exception" << endl; }
+    }).detach();
     return true;
 }
 
@@ -274,6 +282,7 @@ bool kinect2pipe_IR::openBackupDevice() {
     switch (pixfmt) {
         case V4L2_PIX_FMT_YUYV:    avfmt = AV_PIX_FMT_YUYV422; break;
         case V4L2_PIX_FMT_UYVY:    avfmt = AV_PIX_FMT_UYVY422; break;
+        case V4L2_PIX_FMT_GREY:    avfmt = AV_PIX_FMT_GRAY8;   break;
         case V4L2_PIX_FMT_YUV420:  avfmt = AV_PIX_FMT_YUV420P; break;
         case V4L2_PIX_FMT_NV12:    avfmt = AV_PIX_FMT_NV12;    break;
         case V4L2_PIX_FMT_BGR24:   avfmt = AV_PIX_FMT_BGR24;   break;
@@ -376,11 +385,14 @@ bool kinect2pipe_IR::openBackupDevice() {
             case V4L2_PIX_FMT_UYVY:
             case V4L2_PIX_FMT_BGR24:
             case V4L2_PIX_FMT_RGB24:
+            case V4L2_PIX_FMT_GREY:
                 srcData[0]    = base;
                 srcStrides[0] = (pixfmt == V4L2_PIX_FMT_BGR24 ||
                                  pixfmt == V4L2_PIX_FMT_RGB24)
                                     ? capWidth * 3
-                                    : capWidth * 2;
+                                    : (pixfmt == V4L2_PIX_FMT_GREY)
+                                        ? capWidth
+                                        : capWidth * 2;
                 break;
             case V4L2_PIX_FMT_YUV420:
                 srcData[0]    = base;
