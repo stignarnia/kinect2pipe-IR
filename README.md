@@ -85,10 +85,10 @@ echo "v4l2loopback" | sudo tee /etc/modules-load.d/kinect.conf
 ```bash
 # If you have the RGB version (this will put it on /dev/video10, change that number to what you had it before if needed). You can also change the number 11 if you did it above or the card_label if you want:
 sudo rm /etc/modprobe.d/v4l2loopback.conf
-echo 'options v4l2loopback devices=2 video_nr=10,11 card_label="Kinect RGB","Kinect IR" exclusive_caps=1 max_buffers=2' | sudo tee /etc/modprobe.d/kinect.conf
+echo 'options v4l2loopback devices=2 video_nr=10,11 card_label=Kinect_RGB,Kinect_IR exclusive_caps=1 max_buffers=2' | sudo tee /etc/modprobe.d/kinect.conf
 
 # If you don't have the RGB version. You can change the number 11 if you did it above or the card_label if you want:
-echo 'options v4l2loopback video_nr=11 card_label="Kinect IR" exclusive_caps=1 max_buffers=2' | sudo tee /etc/modprobe.d/kinect_IR.conf
+echo 'options v4l2loopback video_nr=11 card_label=Kinect_IR exclusive_caps=1 max_buffers=2' | sudo tee /etc/modprobe.d/kinect_IR.conf
 ```
 
 3. Reboot
