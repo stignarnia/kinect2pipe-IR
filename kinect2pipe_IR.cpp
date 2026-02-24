@@ -361,6 +361,14 @@ bool kinect2pipe_IR::openBackupDevice() {
 
     cout << "backup device stream started (" << capWidth << "x" << capHeight << ")" << endl;
 
+    // Build a swscale context to convert the backup camera's frames to the
+    // same YUV420P format at OUTPUT_WIDTH x OUTPUT_HEIGHT that the loopback
+    // device expects.
+    SwsContext* backupSws = sws_getContext(
+        capWidth, capHeight, avfmt,
+        OUTPUT_WIDTH, OUTPUT_HEIGHT, AV_PIX_FMT_YUV420P,
+        SWS_BILINEAR, nullptr, nullptr, nullptr);
+
     static const int BACKUP_SELECT_TIMEOUT_S = 1;
 
     bool ok = true;
@@ -386,19 +394,55 @@ bool kinect2pipe_IR::openBackupDevice() {
         buf.memory = V4L2_MEMORY_MMAP;
         if (ioctl(fd, VIDIOC_DQBUF, &buf) < 0) { ok = false; break; }
 
+        // Build per-plane pointers depending on whether the format is packed
+        // or planar.
         uint8_t* base = (uint8_t*)bufs[buf.index].start;
-        size_t len = bufs[buf.index].length;
-
-        // Pass backup frame data to loopback device as-is (no resizing/conversion).
-        if (write(this->v4l2Device, base, len) < 0) {
-            ok = false;
+        uint8_t* srcData[4]    = {};
+        int      srcStrides[4] = {};
+        switch (pixfmt) {
+            case V4L2_PIX_FMT_YUYV:
+            case V4L2_PIX_FMT_UYVY:
+            case V4L2_PIX_FMT_BGR24:
+            case V4L2_PIX_FMT_RGB24:
+            case V4L2_PIX_FMT_GREY:
+                srcData[0]    = base;
+                srcStrides[0] = (pixfmt == V4L2_PIX_FMT_BGR24 ||
+                                 pixfmt == V4L2_PIX_FMT_RGB24)
+                                    ? capWidth * 3
+                                    : (pixfmt == V4L2_PIX_FMT_GREY)
+                                        ? capWidth
+                                        : capWidth * 2;
+                break;
+            case V4L2_PIX_FMT_YUV420:
+                srcData[0]    = base;
+                srcData[1]    = base + capWidth * capHeight;
+                srcData[2]    = base + capWidth * capHeight
+                                     + (capWidth / 2) * (capHeight / 2);
+                srcStrides[0] = capWidth;
+                srcStrides[1] = capWidth / 2;
+                srcStrides[2] = capWidth / 2;
+                break;
+            case V4L2_PIX_FMT_NV12:
+                srcData[0]    = base;
+                srcData[1]    = base + capWidth * capHeight;
+                srcStrides[0] = capWidth;
+                srcStrides[1] = capWidth;
+                break;
+            default:
+                break;
         }
+
+        sws_scale(backupSws, srcData, srcStrides, 0, capHeight,
+                  this->dstPtr, this->dstStride);
 
         if (ioctl(fd, VIDIOC_QBUF, &buf) < 0) { ok = false; break; }
 
-        if (!ok) break;
+        if (write(this->v4l2Device, this->imageBuffer, YUV_BUFFER_LEN) < 0) {
+            ok = false; break;
+        }
     }
 
+    sws_freeContext(backupSws);
     ioctl(fd, VIDIOC_STREAMOFF, &btype);
     for (unsigned i = 0; i < nbuf; i++) munmap(bufs[i].start, bufs[i].length);
     close(fd);

@@ -121,6 +121,8 @@ systemctl --user daemon-reload
 systemctl --user restart kinect2pipe_IR
 ```
 
+The backup device should output one of the following pixel formats (tried in preference order): YUYV, UYVY, YUV420, NV12, BGR24, RGB24. Frames are scaled to 512 × 424 with bilinear interpolation before being written to the loopback device.
+
 `<yourdevice>` can be found by looking at the output of `v4l2-ctl --list-devices` or by looking at the symlinks in `/dev/v4l/by-id/` and `dev/v4l/by-path/` (recommended since they are usually more stable).
 
 #### Configuring Howdy
