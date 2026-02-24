@@ -5,11 +5,14 @@
 #include <linux/videodev2.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/select.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <csignal>
 #include <thread>
 #include <cstring>
+#include <vector>
 #include "kinect2pipe_IR.h"
 
 extern "C" {
@@ -78,6 +81,10 @@ void kinect2pipe_IR::openLoopback(const char* loopbackDev) {
     if (!this->openInotifyWatcher(loopbackDev)) {
         exit(1);
     }
+}
+
+void kinect2pipe_IR::setBackupDevice(const char* dev) {
+    this->backupDevPath = dev;
 }
 
 bool kinect2pipe_IR::openV4L2LoopbackDevice(const char* loopbackDev, int width, int height) {
@@ -184,15 +191,27 @@ bool kinect2pipe_IR::openKinect2Device() {
 
     cout << "kinect2 IR stream started" << endl;
 
+    // When a backup device is configured use a short timeout so a USB disconnect
+    // is detected within ~0.5 s (5 × 100 ms).  Without backup the original
+    // 1-second timeout is kept to preserve the existing behaviour.
+    const int  timeoutMs  = this->backupDevPath.empty() ? 1000 : 100;
+    const int  maxMissed  = 5;
+    int        missedCount = 0;
+
     while (true) {
         {
             unique_lock<mutex> lk(this->cvMutex);
             if (this->shouldStop) break;
         }
 
-        if (!listener.waitForNewFrame(frames, 1000)) {
+        if (!listener.waitForNewFrame(frames, timeoutMs)) {
+            if (!this->backupDevPath.empty() && ++missedCount >= maxMissed) {
+                cerr << "kinect2 device not responding, switching to backup" << endl;
+                break;
+            }
             continue;
         }
+        missedCount = 0;
 
         if (!this->handleFrame(frames[Frame::Ir])) {
             listener.release(frames);
@@ -223,6 +242,182 @@ bool kinect2pipe_IR::handleFrame(Frame* frame) {
     return write(this->v4l2Device, this->imageBuffer, YUV_BUFFER_LEN) > 0;
 }
 
+bool kinect2pipe_IR::openBackupDevice() {
+    cout << "switching to backup device: " << this->backupDevPath << endl;
+
+    int fd = open(this->backupDevPath.c_str(), O_RDWR | O_NONBLOCK);
+    if (fd < 0) {
+        cerr << "failed to open backup device: " << strerror(errno) << endl;
+        return false;
+    }
+
+    // Try to negotiate YUYV; if the driver refuses, accept whatever it gives us.
+    struct v4l2_format fmt{};
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(fd, VIDIOC_G_FMT, &fmt) < 0) {
+        cerr << "backup device: VIDIOC_G_FMT failed: " << strerror(errno) << endl;
+        close(fd);
+        return false;
+    }
+    uint32_t wantedFmt = V4L2_PIX_FMT_YUYV;
+    fmt.fmt.pix.pixelformat = wantedFmt;
+    if (ioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
+        cerr << "backup device: driver refused YUYV, using native format" << endl;
+    }
+    ioctl(fd, VIDIOC_G_FMT, &fmt);   // re-read what was actually set
+
+    int      capWidth  = (int)fmt.fmt.pix.width;
+    int      capHeight = (int)fmt.fmt.pix.height;
+    uint32_t pixfmt    = fmt.fmt.pix.pixelformat;
+
+    AVPixelFormat avfmt;
+    switch (pixfmt) {
+        case V4L2_PIX_FMT_YUYV:    avfmt = AV_PIX_FMT_YUYV422; break;
+        case V4L2_PIX_FMT_UYVY:    avfmt = AV_PIX_FMT_UYVY422; break;
+        case V4L2_PIX_FMT_YUV420:  avfmt = AV_PIX_FMT_YUV420P; break;
+        case V4L2_PIX_FMT_NV12:    avfmt = AV_PIX_FMT_NV12;    break;
+        case V4L2_PIX_FMT_BGR24:   avfmt = AV_PIX_FMT_BGR24;   break;
+        case V4L2_PIX_FMT_RGB24:   avfmt = AV_PIX_FMT_RGB24;   break;
+        default:
+            cerr << "backup device: unsupported pixel format: "
+                 << (char)(pixfmt & 0xff)         << (char)((pixfmt >> 8) & 0xff)
+                 << (char)((pixfmt >> 16) & 0xff) << (char)((pixfmt >> 24) & 0xff)
+                 << endl;
+            close(fd);
+            return false;
+    }
+
+    // Request MMAP capture buffers.
+    struct v4l2_requestbuffers req{};
+    req.count  = 2;
+    req.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    req.memory = V4L2_MEMORY_MMAP;
+    if (ioctl(fd, VIDIOC_REQBUFS, &req) < 0 || req.count < 1) {
+        cerr << "backup device: VIDIOC_REQBUFS failed: " << strerror(errno) << endl;
+        close(fd);
+        return false;
+    }
+
+    struct BufInfo { void* start; size_t length; };
+    std::vector<BufInfo> bufs(req.count, BufInfo{nullptr, 0});
+    unsigned nbuf = req.count;
+    for (unsigned i = 0; i < nbuf; i++) {
+        struct v4l2_buffer buf{};
+        buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.index  = i;
+        if (ioctl(fd, VIDIOC_QUERYBUF, &buf) < 0) {
+            for (unsigned j = 0; j < i; j++) munmap(bufs[j].start, bufs[j].length);
+            close(fd); return false;
+        }
+        bufs[i].length = buf.length;
+        bufs[i].start  = mmap(nullptr, buf.length,
+                               PROT_READ | PROT_WRITE, MAP_SHARED, fd, buf.m.offset);
+        if (bufs[i].start == MAP_FAILED) {
+            for (unsigned j = 0; j < i; j++) munmap(bufs[j].start, bufs[j].length);
+            close(fd); return false;
+        }
+        if (ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
+            for (unsigned j = 0; j <= i; j++) munmap(bufs[j].start, bufs[j].length);
+            close(fd); return false;
+        }
+    }
+
+    enum v4l2_buf_type btype = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(fd, VIDIOC_STREAMON, &btype) < 0) {
+        cerr << "backup device: VIDIOC_STREAMON failed: " << strerror(errno) << endl;
+        for (unsigned i = 0; i < nbuf; i++) munmap(bufs[i].start, bufs[i].length);
+        close(fd);
+        return false;
+    }
+
+    cout << "backup device stream started (" << capWidth << "x" << capHeight << ")" << endl;
+
+    // Build a swscale context to convert the backup camera's frames to the
+    // same YUV420P format at OUTPUT_WIDTH x OUTPUT_HEIGHT that the loopback
+    // device expects.
+    SwsContext* backupSws = sws_getContext(
+        capWidth, capHeight, avfmt,
+        OUTPUT_WIDTH, OUTPUT_HEIGHT, AV_PIX_FMT_YUV420P,
+        SWS_BILINEAR, nullptr, nullptr, nullptr);
+
+    static const int BACKUP_SELECT_TIMEOUT_S = 1;
+
+    bool ok = true;
+    while (true) {
+        {
+            unique_lock<mutex> lk(this->cvMutex);
+            if (this->shouldStop) break;
+        }
+
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
+        struct timeval tv = {BACKUP_SELECT_TIMEOUT_S, 0};
+        int r = select(fd + 1, &fds, nullptr, nullptr, &tv);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            ok = false; break;
+        }
+        if (r == 0) continue; // timeout – re-check shouldStop
+
+        struct v4l2_buffer buf{};
+        buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        if (ioctl(fd, VIDIOC_DQBUF, &buf) < 0) { ok = false; break; }
+
+        // Build per-plane pointers depending on whether the format is packed
+        // or planar.
+        uint8_t* base = (uint8_t*)bufs[buf.index].start;
+        uint8_t* srcData[4]    = {};
+        int      srcStrides[4] = {};
+        switch (pixfmt) {
+            case V4L2_PIX_FMT_YUYV:
+            case V4L2_PIX_FMT_UYVY:
+            case V4L2_PIX_FMT_BGR24:
+            case V4L2_PIX_FMT_RGB24:
+                srcData[0]    = base;
+                srcStrides[0] = (pixfmt == V4L2_PIX_FMT_BGR24 ||
+                                 pixfmt == V4L2_PIX_FMT_RGB24)
+                                    ? capWidth * 3
+                                    : capWidth * 2;
+                break;
+            case V4L2_PIX_FMT_YUV420:
+                srcData[0]    = base;
+                srcData[1]    = base + capWidth * capHeight;
+                srcData[2]    = base + capWidth * capHeight
+                                     + (capWidth / 2) * (capHeight / 2);
+                srcStrides[0] = capWidth;
+                srcStrides[1] = capWidth / 2;
+                srcStrides[2] = capWidth / 2;
+                break;
+            case V4L2_PIX_FMT_NV12:
+                srcData[0]    = base;
+                srcData[1]    = base + capWidth * capHeight;
+                srcStrides[0] = capWidth;
+                srcStrides[1] = capWidth;
+                break;
+            default:
+                break;
+        }
+
+        sws_scale(backupSws, srcData, srcStrides, 0, capHeight,
+                  this->dstPtr, this->dstStride);
+
+        if (ioctl(fd, VIDIOC_QBUF, &buf) < 0) { ok = false; break; }
+
+        if (write(this->v4l2Device, this->imageBuffer, YUV_BUFFER_LEN) < 0) {
+            ok = false; break;
+        }
+    }
+
+    sws_freeContext(backupSws);
+    ioctl(fd, VIDIOC_STREAMOFF, &btype);
+    for (unsigned i = 0; i < nbuf; i++) munmap(bufs[i].start, bufs[i].length);
+    close(fd);
+    return ok;
+}
+
 void kinect2pipe_IR::run() {
     // Wait until a consumer opens the device, or until shutdown() is called
     {
@@ -234,9 +429,21 @@ void kinect2pipe_IR::run() {
     }
 
     cout << "starting kinect2 IR capture" << endl;
-    if (!this->openKinect2Device()) {
-        exit(-1);
+    bool kinectOk = this->openKinect2Device();
+
+    // If shutdown was requested during capture, exit cleanly.
+    {
+        unique_lock<mutex> lk(this->cvMutex);
+        if (this->shouldStop) exit(0);
     }
+
+    // Fall back to the backup device when kinect failed to open or disconnected.
+    if (!this->backupDevPath.empty()) {
+        this->openBackupDevice();
+        exit(0);
+    }
+
+    if (!kinectOk) exit(-1);
     exit(0);
 }
 

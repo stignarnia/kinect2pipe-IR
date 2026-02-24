@@ -3,6 +3,7 @@
 
 #include <libfreenect2/libfreenect2.hpp>
 #include <libfreenect2/frame_listener_impl.h>
+#include <string>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -26,6 +27,7 @@ class kinect2pipe_IR {
 public:
     explicit kinect2pipe_IR();
     void openLoopback(const char* loopbackDev);
+    void setBackupDevice(const char* dev);
     void run();
     void shutdown();
 
@@ -33,6 +35,8 @@ private:
     Freenect2        freenect2;
     FrameMap         frames;
     int              v4l2Device;
+
+    std::string        backupDevPath;
 
     struct SwsContext* sws;
     float*             normBuf;
@@ -53,6 +57,7 @@ private:
     bool openV4L2LoopbackDevice(const char* loopbackDev, int width, int height);
     bool openInotifyWatcher(const char* loopbackDev);
     bool openKinect2Device();
+    bool openBackupDevice();
     bool handleFrame(Frame* frame);
     void inotifyWatcher(const char* loopbackDev);
     void writeBlankFrame();

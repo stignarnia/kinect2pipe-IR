@@ -116,6 +116,22 @@ vlc v4l2:///dev/video11
 You should get IR video output:
 ![example snapshot](snapshot.png)
 
+#### Backup device (optional)
+
+You can pass a second argument pointing to a regular V4L2 capture device.  When the
+Kinect 2 is not present at start-up, or is unplugged while a client is active, the
+application will immediately and transparently switch to streaming frames from that
+device instead.  Clients reading from the loopback device are unaware of the switch.
+
+```bash
+kinect2pipe_IR /dev/video11 /dev/v4l/by-path/pci-0000:65:00.4-usb-0:1:1.2-video-index0
+```
+
+The backup device should output one of the following pixel formats (tried in
+preference order): YUYV, UYVY, YUV420, NV12, BGR24, RGB24.  Frames are scaled
+to 512 × 424 with bilinear interpolation before being written to the loopback
+device.
+
 #### Configuring Howdy
 
 ```bash
