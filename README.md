@@ -66,12 +66,11 @@ pacman -Qs libswscale
 echo "v4l2loopback" | sudo tee /etc/modules-load.d/kinect.conf
 ```
 
-2. Create the v4l2loopback virtual devices at boot with the following command. We are not setting `exclusive_caps=1 max_buffers=2` which are needed for browsers to see the device. This is because they open handles at boot and never release them, so the IR emitter would be on all the time. Change if needed:
+2. Create the v4l2loopback virtual devices at boot with the following command. We are only setting `exclusive_caps=1 max_buffers=2` on `video10`, which are needed for browsers to see the device. This is because they open handles at boot and never release them, so the IR emitter would be on all the time. Change if needed by adding `,1` and `,2` after the `1` and `2` in the command:
 ```bash
 # If you have the RGB version (this will put it on /dev/video10, change that number to what you had it before if needed). You can also change the number 11 or the card_label if you want:
 sudo rm /etc/modprobe.d/v4l2loopback.conf
-echo 'options v4l2loopback devices=1 video_nr=10 card_label=Kinect_RGB exclusive_caps=1 max_buffers=2
-options v4l2loopback devices=1 video_nr=11 card_label=Kinect_IR' | sudo tee /etc/modprobe.d/kinect.conf
+echo 'options v4l2loopback devices=2 video_nr=10,11 card_label=Kinect_RGB,Kinect_IR exclusive_caps=1 max_buffers=2' | sudo tee /etc/modprobe.d/kinect.conf
 
 # If you don't have the RGB version. You can change the number 11 or the card_label if you want:
 echo 'options v4l2loopback video_nr=11 card_label=Kinect_IR' | sudo tee /etc/modprobe.d/kinect_IR.conf
