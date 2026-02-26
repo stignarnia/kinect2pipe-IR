@@ -1,0 +1,18 @@
+[Desktop Entry]
+Comment[it_IT]=
+Comment=
+Exec=konsole -e bash -c 'sudo systemctl restart kinect2pipe_IR; systemctl --user restart kinect2pipe;  exit'
+GenericName[it_IT]=
+GenericName=
+Icon=redshift-gtk
+MimeType=
+Name[it_IT]=Restart IR
+Name=Restart IR
+Path=
+PrefersNonDefaultGPU=false
+StartupNotify=true
+Terminal=false
+TerminalOptions=
+Type=Application
+X-KDE-SubstituteUID=false
+X-KDE-Username=

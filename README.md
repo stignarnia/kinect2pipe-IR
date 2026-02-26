@@ -125,6 +125,19 @@ The program defaults to having this off (never using the GPU). This is because t
 ./kinect2pipe_IR /dev/video11 --hwaccel
 ```
 
+#### Shortcut to restart the service
+
+If the IR emitter is stuck on (because some application opened the device and never released it), you have to restart the service with:
+
+```bash
+sudo systemctl restart kinect2pipe_IR.service
+
+# For the original RGB version
+systemctl --user restart kinect2pipe.service
+```
+
+Or you can copy the `.desktop` file from this repository to your desktop and just double click it, if you are on KDE.
+
 #### Configuring Howdy
 
 ```bash
