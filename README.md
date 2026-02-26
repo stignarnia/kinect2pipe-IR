@@ -118,6 +118,14 @@ The backup device should output one of the following pixel formats (tried in pre
 
 `<yourdevice>` can be found by looking at the output of `v4l2-ctl --list-devices` or by looking at the symlinks in `/dev/v4l/by-id/` and `dev/v4l/by-path/` (recommended since they are usually more stable).
 
+#### Hardware acceleration (optional)
+
+The program defaults to having this off (never using the GPU). This is because the GPU isn't available in the pre login environment where this needs to run for face unlock. You can turn it on the same way as the backup device, by passing `-DHWACCEL=ON` to CMake. You will gain a more fluid video stream (useless for face unlock) but it will only work after you login the first time (for runtime things like `sudo`, `plymouth` and the `Win+L` lock screen but not at boot). You can also just run the application with that flag if you need it for other purposes that don't require a system service to run all the time:
+
+```bash
+./kinect2pipe_IR /dev/video11 --hwaccel
+```
+
 #### Configuring Howdy
 
 ```bash

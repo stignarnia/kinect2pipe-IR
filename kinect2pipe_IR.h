@@ -32,6 +32,12 @@ public:
     void run();
     void shutdown();
 
+    // control whether the class will request a hardware-accelerated pipeline
+    // from libfreenect2.  The default constructor leaves this disabled, which
+    // forces a CPU pipeline suitable for headless operation.  Applications can
+    // toggle it before calling run().
+    void setHwAccel(bool enable) { hwAccelEnabled = enable; }
+
 private:
     Freenect2        freenect2;
     FrameMap         frames;
@@ -55,6 +61,9 @@ private:
     bool               started;    // first consumer opened
     bool               shouldStop; // last consumer gone or signal
     std::atomic<bool>  cleanupComplete; // set when device shutdown finished
+
+    // internal flag controlling pipeline choice
+    bool hwAccelEnabled;
 
     bool openV4L2LoopbackDevice(const char* loopbackDev, int width, int height);
     bool openInotifyWatcher(const char* loopbackDev);

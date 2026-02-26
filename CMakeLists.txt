@@ -25,6 +25,12 @@ install(TARGETS kinect2pipe_IR
 # at configuration time with -DBACKUP_PATH=/path when calling cmake
 option(BACKUP_PATH "path passed to kinect2pipe_IR via --backup" "")
 
+# option to indicate that the systemd unit should launch the daemon with
+# the runtime --hwaccel flag. This matches the command line flag added to
+# the application and defaults to OFF since headless operation is the
+# preferred behaviour for most installs.
+option(HWACCEL "pass --hwaccel to kinect2pipe_IR in the service unit" OFF)
+
 # option to control the first argument (loopback device) used by the
 # systemd unit. The default is /dev/video11 but can be
 # overridden precisely the same way as BACKUP_PATH
@@ -49,6 +55,13 @@ if(BACKUP_PATH)
     set(BACKUP_ARG "${BACKUP_PATH}")
 else()
     set(BACKUP_ARG "")
+endif()
+
+# pass hwaccel flag if requested
+if(HWACCEL)
+    set(HWACCEL_ARG "--hwaccel")
+else()
+    set(HWACCEL_ARG "")
 endif()
 
 # configure systemd service unit so that the executable path and arguments

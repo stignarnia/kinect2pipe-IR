@@ -7,7 +7,7 @@ Wants=network-online.target
 [Service]
 User=@SERVICE_USER@
 Group=@SERVICE_GROUP@
-ExecStart=@CMAKE_INSTALL_PREFIX@/bin/kinect2pipe_IR @LOOPBACK_ARG@ @BACKUP_ARG@
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/kinect2pipe_IR @LOOPBACK_ARG@ @BACKUP_ARG@ @HWACCEL_ARG@
 Restart=always
 
 [Install]

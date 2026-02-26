@@ -2,6 +2,7 @@
 #include <libfreenect2/logger.h>
 #include <libfreenect2/libfreenect2.hpp>
 #include <libfreenect2/frame_listener_impl.h>
+#include <libfreenect2/packet_pipeline.h> // For CPU pipeline instead of OpenGL, which isn't available pre login
 #include <linux/videodev2.h>
 #include <sys/inotify.h>
 #include <sys/ioctl.h>
@@ -61,6 +62,9 @@ kinect2pipe_IR::kinect2pipe_IR() {
     this->started    = false;
     this->shouldStop = false;
     this->cleanupComplete.store(false);
+
+    // default behaviour is to disable hardware acceleration (i.e. use CPU pipeline) so the process can run headless.
+    this->hwAccelEnabled = false;
 
     signal(SIGINT,  signalHandler);
     signal(SIGTERM, signalHandler);
@@ -183,9 +187,27 @@ bool kinect2pipe_IR::openKinect2Device() {
         return false;
     }
 
-    dev = freenect2.openDefaultDevice();
+    // On some systems we can't rely on a GPU/OpenGL pipeline until a
+    // graphical session exists, so the default behaviour is to force the CPU
+    // packet pipeline.  When the new --hwaccel flag is supplied we skip this
+    // and let libfreenect2 choose whatever pipeline it prefers.
+    libfreenect2::PacketPipeline *pipeline = nullptr;
+    if (!hwAccelEnabled) {
+        pipeline = new libfreenect2::CpuPacketPipeline();
+    }
+
+    std::string serial = freenect2.getDefaultDeviceSerialNumber();
+    
+    if (hwAccelEnabled) {
+        // overload without pipeline pointer
+        dev = freenect2.openDevice(serial);
+    } else {
+        dev = freenect2.openDevice(serial, pipeline);
+    }
+
     if (!dev) {
         cerr << "failed to open kinect2 device" << endl;
+        delete pipeline; // harmless if null
         return false;
     }
 
