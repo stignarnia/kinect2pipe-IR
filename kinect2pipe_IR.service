@@ -7,6 +7,7 @@ Wants=network-online.target
 [Service]
 User=@SERVICE_USER@
 Group=@SERVICE_GROUP@
+Environment="XDG_RUNTIME_DIR=/run/user/1000"
 ExecStart=@CMAKE_INSTALL_PREFIX@/bin/kinect2pipe_IR @LOOPBACK_ARG@ @BACKUP_ARG@ @HWACCEL_ARG@
 Restart=always
 
