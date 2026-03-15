@@ -160,18 +160,26 @@ void kinect2pipe_IR::inotifyWatcher(const char* loopbackDev) {
             break;
         }
 
-        const struct inotify_event* ev = reinterpret_cast<const struct inotify_event*>(buf);
+        // Iterate over ALL events in the buffer. A single read() can return
+        // multiple batched events (each 16 bytes for device-file watches).
+        // Previously only the first event was processed, so an IN_CLOSE that
+        // arrived in the same read() as an IN_OPEN was silently dropped.
+        for (ssize_t off = 0; off < len; ) {
+            const struct inotify_event* ev =
+                reinterpret_cast<const struct inotify_event*>(buf + off);
+            off += sizeof(struct inotify_event) + ev->len;
 
-        if (ev->mask & IN_OPEN) {
-            cout << "consumer opened device" << endl;
-            lock_guard<mutex> lk(this->cvMutex);
-            this->started = true;
-            this->cv.notify_one();
-        } else if (ev->mask & (IN_CLOSE_WRITE | IN_CLOSE_NOWRITE)) {
-            cout << "consumer closed device, shutting down" << endl;
-            this->shutdown();
-            close(ifd);
-            return;
+            if (ev->mask & IN_OPEN) {
+                cout << "consumer opened device" << endl;
+                lock_guard<mutex> lk(this->cvMutex);
+                this->started = true;
+                this->cv.notify_one();
+            } else if (ev->mask & (IN_CLOSE_WRITE | IN_CLOSE_NOWRITE)) {
+                cout << "consumer closed device, shutting down" << endl;
+                this->shutdown();
+                close(ifd);
+                return;
+            }
         }
     }
 
